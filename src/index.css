@@ -1,0 +1,15 @@
+@import url('https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=Sarabun:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Sarabun", "Kanit", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Kanit", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  font-family: "Sarabun", sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Kanit", sans-serif;
+}
