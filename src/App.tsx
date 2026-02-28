@@ -798,8 +798,6 @@ function LoginScreen({ onLogin, onGoogleLogin, onPhoneLogin, t, cardClass, theme
             )}
           </div>
 
-          <div id="recaptcha-container"></div>
-
           {confirmationResult && (
             <motion.button 
               whileHover={{ scale: 1.01 }}
@@ -837,6 +835,7 @@ function LoginScreen({ onLogin, onGoogleLogin, onPhoneLogin, t, cardClass, theme
           Google
         </button>
       </div>
+      <div id="recaptcha-container"></div>
     </div>
   );
 }
