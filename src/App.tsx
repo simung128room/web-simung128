@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { initialStudents } from './data';
 import { translations, Language } from './translations';
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, RecaptchaVerifier } from 'firebase/auth';
+import { getAuth, RecaptchaVerifier, GoogleAuthProvider, signInWithPopup, signInWithPhoneNumber } from 'firebase/auth';
 import { getDatabase, ref, onValue, set } from 'firebase/database';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { GlobalChat, AdminAnnouncements, Recommendations } from './components/Features';
 
 declare global {
   interface Window {
@@ -71,6 +72,7 @@ interface Grade {
   term: string;
   score: number;
   grade: string;
+  credits: number;
   timestamp: number;
 }
 
@@ -112,6 +114,19 @@ interface Announcement {
   author: string;
 }
 
+interface Recommendation {
+  id: string;
+  userId: string;
+  userName: string;
+  userAvatar: string;
+  type: 'novel' | 'webtoon';
+  title: string;
+  description: string;
+  imageUrl?: string;
+  link?: string;
+  timestamp: number;
+}
+
 interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -131,6 +146,7 @@ export default function App() {
   const [loginHistory, setLoginHistory] = useState<LoginEvent[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const isInitialLoad = useRef(true);
 
   // Initialize DB
@@ -141,11 +157,12 @@ export default function App() {
     const historyRef = ref(db, 'history');
     const chatRef = ref(db, 'chat');
     const announcementsRef = ref(db, 'announcements');
+    const recommendationsRef = ref(db, 'recommendations');
 
     const unsubscribeUsers = onValue(usersRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
-        setUsers(data);
+        setUsers(Array.isArray(data) ? data : Object.values(data));
       } else {
         const initUsers = initialStudents.map(s => ({ 
           ...s, 
@@ -162,21 +179,28 @@ export default function App() {
     const unsubscribeHistory = onValue(historyRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
-        setLoginHistory(data);
+        setLoginHistory(Array.isArray(data) ? data : Object.values(data));
       }
     });
 
     const unsubscribeChat = onValue(chatRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
-        setChatMessages(data);
+        setChatMessages(Array.isArray(data) ? data : Object.values(data));
       }
     });
 
     const unsubscribeAnnouncements = onValue(announcementsRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
-        setAnnouncements(data);
+        setAnnouncements(Array.isArray(data) ? data : Object.values(data));
+      }
+    });
+
+    const unsubscribeRecommendations = onValue(recommendationsRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        setRecommendations(Array.isArray(data) ? data : Object.values(data));
       }
     });
 
@@ -191,6 +215,7 @@ export default function App() {
       unsubscribeHistory();
       unsubscribeChat();
       unsubscribeAnnouncements();
+      unsubscribeRecommendations();
     };
   }, []);
 
@@ -227,6 +252,22 @@ export default function App() {
   }, [announcements]);
 
   useEffect(() => {
+    if (isInitialLoad.current) return;
+    if (db) {
+      set(ref(db, 'recommendations'), recommendations);
+    }
+  }, [recommendations]);
+
+  useEffect(() => {
+    if (currentUser && currentUser.id !== 'admin') {
+      const updatedUser = users.find(u => u.id === currentUser.id);
+      if (updatedUser) {
+        setCurrentUser(updatedUser);
+      }
+    }
+  }, [users]);
+
+  useEffect(() => {
     localStorage.setItem('app_lang', language);
   }, [language]);
 
@@ -256,6 +297,72 @@ export default function App() {
     setCurrentUser(sessionUser);
     addLoginHistory(sessionUser);
     return { success: true };
+  };
+
+  const handleGoogleLogin = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
+      const user = result.user;
+      
+      let dbUser = users.find(u => u.email === user.email);
+      
+      if (!dbUser) {
+        dbUser = {
+          id: user.uid.substring(0, 6),
+          name: user.displayName || 'Google User',
+          email: user.email || '',
+          avatar: user.photoURL || '',
+          password: 'google-login',
+          class: '1/1',
+          isBanned: false,
+          grades: []
+        };
+        setUsers(prev => [...prev, dbUser!]);
+      }
+      
+      if (dbUser.isBanned) return { success: false, message: t.bannedMessage };
+      
+      const sessionUser = { id: dbUser.id, name: dbUser.name, role: 'student' as Role };
+      setCurrentUser(sessionUser);
+      addLoginHistory(sessionUser);
+      return { success: true };
+    } catch (error: any) {
+      console.error(error);
+      return { success: false, message: error.message };
+    }
+  };
+
+  const handlePhoneLogin = async (phone: string, verificationCode: string, confirmationResult: any) => {
+    try {
+      const result = await confirmationResult.confirm(verificationCode);
+      const user = result.user;
+      
+      let dbUser = users.find(u => u.phone === user.phoneNumber);
+      
+      if (!dbUser) {
+        dbUser = {
+          id: user.uid.substring(0, 6),
+          name: 'Phone User',
+          phone: user.phoneNumber || '',
+          password: 'phone-login',
+          class: '1/1',
+          isBanned: false,
+          grades: []
+        };
+        setUsers(prev => [...prev, dbUser!]);
+      }
+      
+      if (dbUser.isBanned) return { success: false, message: t.bannedMessage };
+      
+      const sessionUser = { id: dbUser.id, name: dbUser.name, role: 'student' as Role };
+      setCurrentUser(sessionUser);
+      addLoginHistory(sessionUser);
+      return { success: true };
+    } catch (error: any) {
+      console.error(error);
+      return { success: false, message: "Invalid OTP code" };
+    }
   };
 
   const handleLogout = () => setCurrentUser(null);
@@ -374,7 +481,7 @@ export default function App() {
               transition={{ duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
               className="flex-1 overflow-y-auto flex items-center justify-center p-4 relative z-10"
             >
-              <LoginScreen onLogin={handleLogin} t={t} cardClass={getCardClasses()} theme={theme} />
+              <LoginScreen onLogin={handleLogin} onGoogleLogin={handleGoogleLogin} onPhoneLogin={handlePhoneLogin} t={t} cardClass={getCardClasses()} theme={theme} />
             </motion.div>
           ) : currentUser.role === 'admin' ? (
             <motion.div 
@@ -390,7 +497,11 @@ export default function App() {
                 setUsers={setUsers} 
                 history={loginHistory} 
                 chatMessages={chatMessages}
+                setChatMessages={setChatMessages}
                 announcements={announcements}
+                setAnnouncements={setAnnouncements}
+                recommendations={recommendations}
+                setRecommendations={setRecommendations}
                 theme={theme} 
                 setTheme={setTheme}
                 cardClass={getCardClasses()}
@@ -413,7 +524,10 @@ export default function App() {
                 users={users}
                 setUsers={setUsers}
                 chatMessages={chatMessages}
+                setChatMessages={setChatMessages}
                 announcements={announcements}
+                recommendations={recommendations}
+                setRecommendations={setRecommendations}
                 cardClass={getCardClasses()}
                 sidebarClass={getSidebarClasses()}
                 theme={theme}
@@ -429,39 +543,74 @@ export default function App() {
 }
 
 // --- Unified Login Screen ---
-function LoginScreen({ onLogin, t, cardClass, theme }: any) {
+function LoginScreen({ onLogin, onGoogleLogin, onPhoneLogin, t, cardClass, theme }: any) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-  const [botVerified, setBotVerified] = useState(!isFirebaseConfigured); // Auto-verify if no Firebase
   const [loading, setLoading] = useState(false);
+  const [loginMethod, setLoginMethod] = useState<'password' | 'phone'>('password');
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [confirmationResult, setConfirmationResult] = useState<any>(null);
+  
+  // Math CAPTCHA
+  const [num1, setNum1] = useState(Math.floor(Math.random() * 10) + 1);
+  const [num2, setNum2] = useState(Math.floor(Math.random() * 10) + 1);
+  const [captchaAnswer, setCaptchaAnswer] = useState('');
+
+  const refreshCaptcha = () => {
+    setNum1(Math.floor(Math.random() * 10) + 1);
+    setNum2(Math.floor(Math.random() * 10) + 1);
+    setCaptchaAnswer('');
+  };
 
   useEffect(() => {
-    if (isFirebaseConfigured && !window.recaptchaVerifier) {
-      try {
-        window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-          'size': 'normal',
-          'callback': () => setBotVerified(true),
-          'expired-callback': () => setBotVerified(false)
-        });
-        window.recaptchaVerifier.render().catch((err: any) => {
-          console.warn("Recaptcha render error (expected in preview without authorized domain):", err);
-          // Fallback for preview environments
-          setBotVerified(true);
-        });
-      } catch (e) {
-        console.warn("Recaptcha init failed, bypassing for demo mode", e);
-        setBotVerified(true);
-      }
+    if (!window.recaptchaVerifier) {
+      window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+        'size': 'invisible',
+        'callback': () => {},
+      });
     }
   }, []);
+
+  const handleSendOTP = async () => {
+    if (!phoneNumber) {
+      setError("Please enter a phone number");
+      return;
+    }
+    setError('');
+    setLoading(true);
+    try {
+      const confirmation = await signInWithPhoneNumber(auth, phoneNumber, window.recaptchaVerifier);
+      setConfirmationResult(confirmation);
+      alert("OTP sent to your phone");
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Failed to send OTP");
+    }
+    setLoading(false);
+  };
+
+  const handlePhoneSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!confirmationResult || !verificationCode) return;
+    
+    setError('');
+    setLoading(true);
+    const res = await onPhoneLogin(phoneNumber, verificationCode, confirmationResult);
+    if (!res.success) {
+      setError(res.message);
+    }
+    setLoading(false);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     
-    if (!botVerified) {
-      setError(t.verifyBot);
+    if (parseInt(captchaAnswer) !== num1 + num2) {
+      setError("Bot verification failed. Please try again.");
+      refreshCaptcha();
       return;
     }
 
@@ -470,7 +619,19 @@ function LoginScreen({ onLogin, t, cardClass, theme }: any) {
     await new Promise(r => setTimeout(r, 600));
     
     const res = onLogin(username, password);
-    if (!res.success) setError(res.message);
+    if (!res.success) {
+      setError(res.message);
+      refreshCaptcha();
+    }
+    setLoading(false);
+  };
+
+  const handleGoogleClick = async () => {
+    setLoading(true);
+    const res = await onGoogleLogin();
+    if (!res.success) {
+      setError(res.message);
+    }
     setLoading(false);
   };
 
@@ -491,75 +652,206 @@ function LoginScreen({ onLogin, t, cardClass, theme }: any) {
         <p className="text-[14px] font-normal mt-2 opacity-70">Authenticate to continue</p>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-6 relative z-10">
-        <AnimatePresence>
-          {error && (
-            <motion.div 
-              initial={{ opacity: 0, height: 0, y: -10 }}
-              animate={{ opacity: 1, height: 'auto', y: 0 }}
-              exit={{ opacity: 0, height: 0, y: -10 }}
-              className="p-3 rounded bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-[13px] flex items-center gap-2 font-medium border border-red-200 dark:border-red-800"
-            >
-              <AlertCircle className="w-4 h-4 shrink-0" /> {error}
-            </motion.div>
-          )}
-        </AnimatePresence>
-        
-        <div className="space-y-4">
-          <div>
-            <input 
-              type="text" 
-              value={username}
-              onChange={e => setUsername(e.target.value)}
-              className={cn("w-full px-4 py-3 rounded border focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-[14px] placeholder:text-neutral-400", 
-                theme === 'dark' ? 'bg-transparent border-[#5f6368]' : 'bg-transparent border-[#dadce0]'
-              )}
-              placeholder="Username"
-              required
-            />
-          </div>
-          
-          <div>
-            <input 
-              type="password" 
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              className={cn("w-full px-4 py-3 rounded border focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-[14px] placeholder:text-neutral-400", 
-                theme === 'dark' ? 'bg-transparent border-[#5f6368]' : 'bg-transparent border-[#dadce0]'
-              )}
-              placeholder="Password"
-              required
-            />
-          </div>
-        </div>
-
-        {/* Firebase Recaptcha Container */}
-        <div id="recaptcha-container" className="flex justify-center min-h-[78px]"></div>
-
-        <motion.button 
-          whileHover={{ scale: 1.01 }}
-          whileTap={{ scale: 0.98 }}
-          type="submit" 
-          disabled={loading || !botVerified}
-          className="w-full py-2.5 rounded bg-[#1a73e8] hover:bg-[#1b66c9] text-white text-[14px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2"
+      <div className="flex justify-center gap-4 mb-6 relative z-10">
+        <button 
+          onClick={() => setLoginMethod('password')}
+          className={cn("px-4 py-2 text-[13px] font-medium rounded-full transition-colors", loginMethod === 'password' ? 'bg-[#1a73e8] text-white' : 'bg-transparent text-neutral-500 hover:bg-black/5 dark:hover:bg-white/5')}
         >
-          {loading ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : t.login}
-        </motion.button>
-      </form>
+          Password
+        </button>
+        <button 
+          onClick={() => setLoginMethod('phone')}
+          className={cn("px-4 py-2 text-[13px] font-medium rounded-full transition-colors", loginMethod === 'phone' ? 'bg-[#1a73e8] text-white' : 'bg-transparent text-neutral-500 hover:bg-black/5 dark:hover:bg-white/5')}
+        >
+          Phone OTP
+        </button>
+      </div>
+
+      {loginMethod === 'password' ? (
+        <form onSubmit={handleSubmit} className="space-y-6 relative z-10">
+          <AnimatePresence>
+            {error && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0, y: -10 }}
+                animate={{ opacity: 1, height: 'auto', y: 0 }}
+                exit={{ opacity: 0, height: 0, y: -10 }}
+                className="p-3 rounded bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-[13px] flex items-center gap-2 font-medium border border-red-200 dark:border-red-800"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0" /> {error}
+              </motion.div>
+            )}
+          </AnimatePresence>
+          
+          <div className="space-y-4">
+            <div>
+              <input 
+                type="text" 
+                value={username}
+                onChange={e => setUsername(e.target.value)}
+                className={cn("w-full px-4 py-3 rounded border focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-[14px] placeholder:text-neutral-400", 
+                  theme === 'dark' ? 'bg-transparent border-[#5f6368]' : 'bg-transparent border-[#dadce0]'
+                )}
+                placeholder="Username"
+                required
+              />
+            </div>
+            
+            <div>
+              <input 
+                type="password" 
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                className={cn("w-full px-4 py-3 rounded border focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-[14px] placeholder:text-neutral-400", 
+                  theme === 'dark' ? 'bg-transparent border-[#5f6368]' : 'bg-transparent border-[#dadce0]'
+                )}
+                placeholder="Password"
+                required
+              />
+            </div>
+          </div>
+
+          {/* Math CAPTCHA */}
+          <div className="space-y-2">
+            <label className="block text-[13px] font-medium opacity-70">Bot Verification</label>
+            <div className="flex items-center gap-3">
+              <div className={cn("px-4 py-3 rounded border font-mono text-[14px] font-medium flex-shrink-0", theme === 'dark' ? 'bg-[#303134] border-[#5f6368]' : 'bg-[#f1f3f4] border-[#dadce0]')}>
+                {num1} + {num2} = ?
+              </div>
+              <input 
+                type="number" 
+                value={captchaAnswer} 
+                onChange={e => setCaptchaAnswer(e.target.value)} 
+                className={cn("flex-1 px-4 py-3 rounded border focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-[14px] placeholder:text-neutral-400", theme === 'dark' ? 'bg-transparent border-[#5f6368]' : 'bg-transparent border-[#dadce0]')}
+                placeholder="Answer"
+                required
+              />
+            </div>
+          </div>
+
+          <motion.button 
+            whileHover={{ scale: 1.01 }}
+            whileTap={{ scale: 0.98 }}
+            type="submit" 
+            disabled={loading}
+            className="w-full py-2.5 rounded bg-[#1a73e8] hover:bg-[#1b66c9] text-white text-[14px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2"
+          >
+            {loading ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : t.login}
+          </motion.button>
+        </form>
+      ) : (
+        <form onSubmit={handlePhoneSubmit} className="space-y-6 relative z-10">
+          <AnimatePresence>
+            {error && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0, y: -10 }}
+                animate={{ opacity: 1, height: 'auto', y: 0 }}
+                exit={{ opacity: 0, height: 0, y: -10 }}
+                className="p-3 rounded bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-[13px] flex items-center gap-2 font-medium border border-red-200 dark:border-red-800"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0" /> {error}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-[13px] font-medium opacity-70 mb-1.5">Phone Number</label>
+              <div className="flex gap-2">
+                <input 
+                  type="tel" 
+                  value={phoneNumber}
+                  onChange={e => setPhoneNumber(e.target.value)}
+                  className={cn("flex-1 px-4 py-3 rounded border focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-[14px] placeholder:text-neutral-400", 
+                    theme === 'dark' ? 'bg-transparent border-[#5f6368]' : 'bg-transparent border-[#dadce0]'
+                  )}
+                  placeholder="+66 81 234 5678"
+                  disabled={!!confirmationResult}
+                  required
+                />
+                {!confirmationResult && (
+                  <button 
+                    type="button"
+                    onClick={handleSendOTP}
+                    disabled={loading || !phoneNumber}
+                    className="px-4 py-3 rounded bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-[13px] font-medium transition-colors disabled:opacity-50"
+                  >
+                    Send OTP
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {confirmationResult && (
+              <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}>
+                <label className="block text-[13px] font-medium opacity-70 mb-1.5">Verification Code</label>
+                <input 
+                  type="text" 
+                  value={verificationCode}
+                  onChange={e => setVerificationCode(e.target.value)}
+                  className={cn("w-full px-4 py-3 rounded border focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-[14px] placeholder:text-neutral-400", 
+                    theme === 'dark' ? 'bg-transparent border-[#5f6368]' : 'bg-transparent border-[#dadce0]'
+                  )}
+                  placeholder="123456"
+                  required
+                />
+              </motion.div>
+            )}
+          </div>
+
+          <div id="recaptcha-container"></div>
+
+          {confirmationResult && (
+            <motion.button 
+              whileHover={{ scale: 1.01 }}
+              whileTap={{ scale: 0.98 }}
+              type="submit" 
+              disabled={loading}
+              className="w-full py-2.5 rounded bg-[#1a73e8] hover:bg-[#1b66c9] text-white text-[14px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2"
+            >
+              {loading ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : "Verify & Login"}
+            </motion.button>
+          )}
+        </form>
+      )}
+
+      <div className="mt-6 relative z-10">
+        <div className="relative flex items-center py-2">
+          <div className="flex-grow border-t border-neutral-200 dark:border-neutral-800"></div>
+          <span className="flex-shrink-0 mx-4 text-neutral-400 text-[12px]">or continue with</span>
+          <div className="flex-grow border-t border-neutral-200 dark:border-neutral-800"></div>
+        </div>
+        
+        <button 
+          onClick={handleGoogleClick}
+          disabled={loading}
+          className={cn("mt-4 w-full py-2.5 rounded border flex items-center justify-center gap-3 text-[14px] font-medium transition-colors hover:bg-black/5 dark:hover:bg-white/5",
+            theme === 'dark' ? 'border-[#5f6368]' : 'border-[#dadce0]'
+          )}
+        >
+          <svg className="w-5 h-5" viewBox="0 0 24 24">
+            <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+            <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+            <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+            <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+          </svg>
+          Google
+        </button>
+      </div>
     </div>
   );
 }
 
 // --- Admin Layout & Features ---
-function AdminLayout({ t, users, setUsers, history, chatMessages, announcements, theme, setTheme, cardClass, sidebarClass, isSidebarOpen, setIsSidebarOpen }: any) {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'grading' | 'logs' | 'settings' | 'chat' | 'announcements'>('dashboard');
+function AdminLayout({ t, users, setUsers, history, chatMessages, setChatMessages, announcements, setAnnouncements, recommendations, setRecommendations, theme, setTheme, cardClass, sidebarClass, isSidebarOpen, setIsSidebarOpen }: any) {
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'grading' | 'logs' | 'settings' | 'chat' | 'announcements' | 'recommendations'>('dashboard');
 
   const navItems = [
     { id: 'dashboard', icon: LayoutDashboard, label: t.dashboard },
     { id: 'users', icon: Users, label: t.userManagement },
     { id: 'grading', icon: GraduationCap, label: t.grading },
-    { id: 'chat', icon: MessageSquare, label: t.chat },
-    { id: 'announcements', icon: Bell, label: t.announcements },
+    { id: 'chat', icon: MessageSquare, label: t.chat || 'Global Chat' },
+    { id: 'announcements', icon: Bell, label: t.announcements || 'Announcements' },
+    { id: 'recommendations', icon: BookOpen, label: 'ป้ายยา' },
     { id: 'logs', icon: History, label: t.systemLogs },
     { id: 'settings', icon: Settings, label: t.settings },
   ];
@@ -637,8 +929,38 @@ function AdminLayout({ t, users, setUsers, history, chatMessages, announcements,
               {activeTab === 'dashboard' && <AdminOverview t={t} users={users} history={history} cardClass={cardClass} />}
               {activeTab === 'users' && <UserManagement t={t} users={users} setUsers={setUsers} cardClass={cardClass} theme={theme} />}
               {activeTab === 'grading' && <GradingSystem t={t} users={users} setUsers={setUsers} cardClass={cardClass} theme={theme} />}
-              {activeTab === 'chat' && <GlobalChat t={t} messages={chatMessages} currentUser={{ id: 'admin', name: 'Admin', role: 'admin' }} cardClass={cardClass} theme={theme} />}
-              {activeTab === 'announcements' && <AdminAnnouncements t={t} announcements={announcements} cardClass={cardClass} theme={theme} />}
+              {activeTab === 'chat' && (
+                <GlobalChat 
+                  t={t} 
+                  messages={chatMessages} 
+                  currentUser={{ id: 'admin', name: 'Admin', role: 'admin' }} 
+                  cardClass={cardClass} 
+                  theme={theme} 
+                  onSendMessage={(msg: any) => setChatMessages([...chatMessages, { ...msg, id: Date.now().toString(), userId: 'admin', userName: 'Admin', userAvatar: 'https://api.dicebear.com/7.x/initials/svg?seed=Admin', timestamp: Date.now() }])}
+                  onDeleteMessage={(id: string) => setChatMessages(chatMessages.filter((m: any) => m.id !== id))}
+                />
+              )}
+              {activeTab === 'announcements' && (
+                <AdminAnnouncements 
+                  t={t} 
+                  announcements={announcements} 
+                  cardClass={cardClass} 
+                  theme={theme} 
+                  onAddAnnouncement={(a: any) => setAnnouncements([{ ...a, id: Date.now().toString(), timestamp: Date.now(), author: 'Admin' }, ...announcements])}
+                  onDeleteAnnouncement={(id: string) => setAnnouncements(announcements.filter((a: any) => a.id !== id))}
+                />
+              )}
+              {activeTab === 'recommendations' && (
+                <Recommendations 
+                  t={t} 
+                  recommendations={recommendations} 
+                  currentUser={{ id: 'admin', name: 'Admin', role: 'admin' }} 
+                  cardClass={cardClass} 
+                  theme={theme} 
+                  onAddRecommendation={(r: any) => setRecommendations([{ ...r, id: Date.now().toString(), userId: 'admin', userName: 'Admin', userAvatar: 'https://api.dicebear.com/7.x/initials/svg?seed=Admin', timestamp: Date.now() }, ...recommendations])}
+                  onDeleteRecommendation={(id: string) => setRecommendations(recommendations.filter((r: any) => r.id !== id))}
+                />
+              )}
               {activeTab === 'logs' && <SystemLogs t={t} history={history} cardClass={cardClass} />}
               {activeTab === 'settings' && <SystemSettings t={t} theme={theme} setTheme={setTheme} cardClass={cardClass} />}
             </motion.div>
@@ -768,12 +1090,13 @@ function GradingSystem({ t, users, setUsers, cardClass, theme }: any) {
   const [subject, setSubject] = useState('');
   const [term, setTerm] = useState('1/2567');
   const [score, setScore] = useState<number | ''>('');
+  const [credits, setCredits] = useState<number | ''>(3);
 
   const selectedUser = users.find((u: User) => u.id === selectedUserId);
 
   const handleAddGrade = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedUser || score === '' || !subject) return;
+    if (!selectedUser || score === '' || !subject || credits === '') return;
 
     const newGrade: Grade = {
       id: Date.now().toString(),
@@ -781,6 +1104,7 @@ function GradingSystem({ t, users, setUsers, cardClass, theme }: any) {
       term,
       score: Number(score),
       grade: calculateGrade(Number(score)),
+      credits: Number(credits),
       timestamp: Date.now()
     };
 
@@ -793,6 +1117,7 @@ function GradingSystem({ t, users, setUsers, cardClass, theme }: any) {
 
     setSubject('');
     setScore('');
+    setCredits(3);
     alert(t.success);
   };
 
@@ -837,7 +1162,7 @@ function GradingSystem({ t, users, setUsers, cardClass, theme }: any) {
           <>
             <div className={cn("rounded-lg border p-5", cardClass)}>
               <h3 className="font-semibold mb-4 flex items-center gap-2"><Plus className="w-4 h-4"/> {t.addGrade}</h3>
-              <form onSubmit={handleAddGrade} className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <form onSubmit={handleAddGrade} className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                 <div>
                   <label className="block text-[11px] font-medium mb-1.5 opacity-60 uppercase">{t.subject}</label>
                   <input type="text" value={subject} onChange={e => setSubject(e.target.value)} required className={cn("w-full px-3 py-2 rounded-lg border outline-none text-[13px]", theme === 'dark' ? 'bg-[#0A0A0A] border-[#262626]' : 'bg-[#FAFAFA] border-[#E5E5E5]')} placeholder="e.g. Math 101" />
@@ -847,10 +1172,14 @@ function GradingSystem({ t, users, setUsers, cardClass, theme }: any) {
                   <input type="text" value={term} onChange={e => setTerm(e.target.value)} required className={cn("w-full px-3 py-2 rounded-lg border outline-none text-[13px]", theme === 'dark' ? 'bg-[#0A0A0A] border-[#262626]' : 'bg-[#FAFAFA] border-[#E5E5E5]')} />
                 </div>
                 <div>
+                  <label className="block text-[11px] font-medium mb-1.5 opacity-60 uppercase">Credits</label>
+                  <input type="number" min="0.5" step="0.5" value={credits} onChange={e => setCredits(e.target.value ? Number(e.target.value) : '')} required className={cn("w-full px-3 py-2 rounded-lg border outline-none text-[13px]", theme === 'dark' ? 'bg-[#0A0A0A] border-[#262626]' : 'bg-[#FAFAFA] border-[#E5E5E5]')} placeholder="e.g. 3" />
+                </div>
+                <div>
                   <label className="block text-[11px] font-medium mb-1.5 opacity-60 uppercase">{t.score}</label>
                   <input type="number" min="0" max="100" value={score} onChange={e => setScore(e.target.value ? Number(e.target.value) : '')} required className={cn("w-full px-3 py-2 rounded-lg border outline-none text-[13px]", theme === 'dark' ? 'bg-[#0A0A0A] border-[#262626]' : 'bg-[#FAFAFA] border-[#E5E5E5]')} placeholder="0-100" />
                 </div>
-                <div className="sm:col-span-3 flex justify-end mt-2">
+                <div className="sm:col-span-4 flex justify-end mt-2">
                   <button type="submit" className="px-5 py-2 rounded-lg bg-black dark:bg-white text-white dark:text-black text-[13px] font-medium transition-colors">
                     {t.save}
                   </button>
@@ -867,6 +1196,7 @@ function GradingSystem({ t, users, setUsers, cardClass, theme }: any) {
                   <tr>
                     <th className="px-4 py-3 font-medium tracking-wider">{t.term}</th>
                     <th className="px-4 py-3 font-medium tracking-wider">{t.subject}</th>
+                    <th className="px-4 py-3 font-medium tracking-wider text-center">Credits</th>
                     <th className="px-4 py-3 font-medium tracking-wider text-center">{t.score}</th>
                     <th className="px-4 py-3 font-medium tracking-wider text-center">{t.grade}</th>
                   </tr>
@@ -877,12 +1207,13 @@ function GradingSystem({ t, users, setUsers, cardClass, theme }: any) {
                       <tr key={g.id} className="hover:bg-[#FAFAFA] dark:hover:bg-[#171717]">
                         <td className="px-4 py-3 text-[13px]">{g.term}</td>
                         <td className="px-4 py-3 font-medium text-[13px]">{g.subject}</td>
+                        <td className="px-4 py-3 text-center text-[13px]">{g.credits || 3}</td>
                         <td className="px-4 py-3 text-center text-[13px]">{g.score}</td>
                         <td className="px-4 py-3 text-center font-semibold text-[13px]">{g.grade}</td>
                       </tr>
                     ))
                   ) : (
-                    <tr><td colSpan={4} className="px-4 py-8 text-center opacity-50 text-[13px]">{t.noData}</td></tr>
+                    <tr><td colSpan={5} className="px-4 py-8 text-center opacity-50 text-[13px]">{t.noData}</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1140,14 +1471,16 @@ function StudentGrades({ t, user, setUsers, cardClass, theme }: any) {
   const [subject, setSubject] = useState('');
   const [term, setTerm] = useState('1/2567');
   const [score, setScore] = useState<number | ''>('');
+  const [credits, setCredits] = useState<number | ''>(3);
   
   // Calculate GPA
-  const totalPoints = grades.reduce((sum: number, g: Grade) => sum + Number(g.grade), 0);
-  const gpa = grades.length > 0 ? (totalPoints / grades.length).toFixed(2) : '0.00';
+  const totalCredits = grades.reduce((sum: number, g: Grade) => sum + (g.credits || 3), 0);
+  const totalPoints = grades.reduce((sum: number, g: Grade) => sum + (Number(g.grade) * (g.credits || 3)), 0);
+  const gpa = totalCredits > 0 ? (totalPoints / totalCredits).toFixed(2) : '0.00';
 
   const handleAddGrade = (e: React.FormEvent) => {
     e.preventDefault();
-    if (score === '' || !subject) return;
+    if (score === '' || !subject || credits === '') return;
 
     const newGrade: Grade = {
       id: Date.now().toString(),
@@ -1155,6 +1488,7 @@ function StudentGrades({ t, user, setUsers, cardClass, theme }: any) {
       term,
       score: Number(score),
       grade: calculateGrade(Number(score)),
+      credits: Number(credits),
       timestamp: Date.now()
     };
 
@@ -1167,6 +1501,7 @@ function StudentGrades({ t, user, setUsers, cardClass, theme }: any) {
 
     setSubject('');
     setScore('');
+    setCredits(3);
     alert(t.success);
   };
 
@@ -1185,7 +1520,7 @@ function StudentGrades({ t, user, setUsers, cardClass, theme }: any) {
 
       <div className={cn("rounded-lg border p-6", cardClass)}>
         <h3 className="font-semibold mb-4 flex items-center gap-2"><Plus className="w-4 h-4 text-pink-500"/> {t.addGrade}</h3>
-        <form onSubmit={handleAddGrade} className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <form onSubmit={handleAddGrade} className="grid grid-cols-1 sm:grid-cols-4 gap-4">
           <div>
             <label className="block text-[11px] font-semibold mb-1.5 opacity-70 uppercase tracking-wider">{t.subject}</label>
             <input type="text" value={subject} onChange={e => setSubject(e.target.value)} required className={cn("w-full px-4 py-2.5 rounded border outline-none text-[13px] transition-all focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500", theme === 'dark' ? 'bg-[#0A0A0A] border-[#262626]' : 'bg-white border-[#dadce0]')} placeholder="e.g. Magic 101" />
@@ -1195,10 +1530,14 @@ function StudentGrades({ t, user, setUsers, cardClass, theme }: any) {
             <input type="text" value={term} onChange={e => setTerm(e.target.value)} required className={cn("w-full px-4 py-2.5 rounded border outline-none text-[13px] transition-all focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500", theme === 'dark' ? 'bg-[#0A0A0A] border-[#262626]' : 'bg-white border-[#dadce0]')} />
           </div>
           <div>
+            <label className="block text-[11px] font-semibold mb-1.5 opacity-70 uppercase tracking-wider">Credits</label>
+            <input type="number" min="0.5" step="0.5" value={credits} onChange={e => setCredits(e.target.value ? Number(e.target.value) : '')} required className={cn("w-full px-4 py-2.5 rounded border outline-none text-[13px] transition-all focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500", theme === 'dark' ? 'bg-[#0A0A0A] border-[#262626]' : 'bg-white border-[#dadce0]')} placeholder="e.g. 3" />
+          </div>
+          <div>
             <label className="block text-[11px] font-semibold mb-1.5 opacity-70 uppercase tracking-wider">{t.score}</label>
             <input type="number" min="0" max="100" value={score} onChange={e => setScore(e.target.value ? Number(e.target.value) : '')} required className={cn("w-full px-4 py-2.5 rounded border outline-none text-[13px] transition-all focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500", theme === 'dark' ? 'bg-[#0A0A0A] border-[#262626]' : 'bg-white border-[#dadce0]')} placeholder="0-100" />
           </div>
-          <div className="sm:col-span-3 flex justify-end mt-2">
+          <div className="sm:col-span-4 flex justify-end mt-2">
             <button type="submit" className="px-6 py-2.5 rounded bg-[#1a73e8] hover:bg-[#1b66c9] text-white text-[13px] font-medium transition-colors">
               {t.save}
             </button>
@@ -1212,6 +1551,7 @@ function StudentGrades({ t, user, setUsers, cardClass, theme }: any) {
             <tr>
               <th className="px-6 py-4 font-semibold">{t.term}</th>
               <th className="px-6 py-4 font-semibold">{t.subject}</th>
+              <th className="px-6 py-4 font-semibold text-center">Credits</th>
               <th className="px-6 py-4 font-semibold text-center">{t.score}</th>
               <th className="px-6 py-4 font-semibold text-center">{t.grade}</th>
             </tr>
@@ -1222,12 +1562,13 @@ function StudentGrades({ t, user, setUsers, cardClass, theme }: any) {
                 <tr key={g.id} className="hover:bg-slate-500/5">
                   <td className="px-6 py-4">{g.term}</td>
                   <td className="px-6 py-4 font-medium">{g.subject}</td>
+                  <td className="px-6 py-4 text-center">{g.credits || 3}</td>
                   <td className="px-6 py-4 text-center">{g.score}</td>
                   <td className="px-6 py-4 text-center font-bold text-blue-600 dark:text-blue-400">{g.grade}</td>
                 </tr>
               ))
             ) : (
-              <tr><td colSpan={4} className="px-6 py-12 text-center opacity-50">{t.noData}</td></tr>
+              <tr><td colSpan={5} className="px-6 py-12 text-center opacity-50">{t.noData}</td></tr>
             )}
           </tbody>
         </table>
